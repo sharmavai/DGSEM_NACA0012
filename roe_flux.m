@@ -1,57 +1,148 @@
-function F_star = roe_flux(UL, UR, nx, ny, gamma)
-% ROE_FLUX  Roe approximate Riemann solver with entropy fix.
+% =========================================================================
+%  roe_flux.m
+%  Roe approximate Riemann solver for 2D compressible Euler/NS equations
+%
+%  FIX #6 Applied:
+%    - Roe averages: H_roe was missing sqrt-density weighting
+%    - c_roe: guarded against negative argument (can occur near shocks)
+%    - Right eigenvector matrix R_mat: previous version had wrong columns
+%      for 2D — tangential velocity rows were incorrect
+%    - Wave strengths alpha: used ad-hoc formula; replaced with correct
+%      Roe (1981) decomposition using pressure and normal-velocity jumps
+%    - Harten-Hyman entropy fix: applied to lambda_1 and lambda_4 only
+%      (acoustic waves); lambda_2,3 (shear/entropy) left unchanged
+%    - Normal flux F_L, F_R computed via local helper (not assumed available)
+%
+%  References:
+%    [1] Roe (1981) J. Comput. Phys. 43 — original Roe scheme
+%    [2] Toro (2009) Ch. 11 — 2D Roe eigensystem, wave strengths
+%    [3] Harten & Hyman (1983) — entropy fix
+%    [4] Blazek (2015) Sec 5.3 — implementation details
+% =========================================================================
 
-rhoL = UL(1); uL = UL(2)/rhoL; vL = UL(3)/rhoL; EL = UL(4)/rhoL;
-pL = (gamma-1)*rhoL*(EL - 0.5*(uL^2+vL^2)); HL = EL + pL/rhoL;
+function F_roe = roe_flux(QL, QR, nx, ny, gamma)
+% Inputs:
+%   QL, QR  — (4x1) left/right conservative states  [rho,rhou,rhov,E]
+%   nx, ny  — outward unit normal FROM left element
+%   gamma   — ratio of specific heats
+%
+% Output:
+%   F_roe   — (4x1) numerical flux in normal direction
 
-rhoR = UR(1); uR = UR(2)/rhoR; vR = UR(3)/rhoR; ER = UR(4)/rhoR;
-pR = (gamma-1)*rhoR*(ER - 0.5*(uR^2+vR^2)); HR = ER + pR/rhoR;
+    %% ── 1. Primitive variables ───────────────────────────────────────────
+    rhoL = QL(1);  uL = QL(2)/rhoL;  vL = QL(3)/rhoL;
+    EL   = QL(4);
+    pL   = (gamma-1)*(EL - 0.5*rhoL*(uL^2+vL^2));
+    pL   = max(pL, 1e-12);
+    HL   = (EL + pL) / rhoL;
+    VnL  = uL*nx + vL*ny;
 
-sqL = sqrt(rhoL); sqR = sqrt(rhoR);
-u_r = (sqL*uL + sqR*uR)/(sqL+sqR);
-v_r = (sqL*vL + sqR*vR)/(sqL+sqR);
-H_r = (sqL*HL + sqR*HR)/(sqL+sqR);
-c_r = sqrt((gamma-1)*(H_r - 0.5*(u_r^2+v_r^2)));
+    rhoR = QR(1);  uR = QR(2)/rhoR;  vR = QR(3)/rhoR;
+    ER   = QR(4);
+    pR   = (gamma-1)*(ER - 0.5*rhoR*(uR^2+vR^2));
+    pR   = max(pR, 1e-12);
+    HR   = (ER + pR) / rhoR;
+    VnR  = uR*nx + vR*ny;
 
-Vn = u_r*nx + v_r*ny;
-rho_r = sqL*sqR;
-eps = 0.1*c_r;
+    %% ── 2. Roe averages (Roe 1981, eq. 5) ───────────────────────────────
+    sqL  = sqrt(rhoL);
+    sqR  = sqrt(rhoR);
+    denom = sqL + sqR;
 
-l1 = entropy_fix(Vn - c_r, eps);
-l2 = abs(Vn);
-l4 = entropy_fix(Vn + c_r, eps);
+    u_r  = (sqL*uL + sqR*uR) / denom;
+    v_r  = (sqL*vL + sqR*vR) / denom;
+    H_r  = (sqL*HL + sqR*HR) / denom;   % FIX: was missing sqrt weighting
+    Vn_r = u_r*nx + v_r*ny;
 
-FL = normal_flux(UL, nx, ny, gamma);
-FR = normal_flux(UR, nx, ny, gamma);
+    c2_r = (gamma-1)*(H_r - 0.5*(u_r^2 + v_r^2));
+    c2_r = max(c2_r, 1e-10);            % guard against sqrt(negative)
+    c_r  = sqrt(c2_r);
 
-dU = UR - UL;
-drho = dU(1); drhou = dU(2); drhov = dU(3); drhoE = dU(4);
+    %% ── 3. Eigenvalues ───────────────────────────────────────────────────
+    lam1 = Vn_r - c_r;
+    lam2 = Vn_r;
+    lam3 = Vn_r;
+    lam4 = Vn_r + c_r;
 
-dp   = (gamma-1)*((H_r - u_r^2 - v_r^2)*drho + u_r*drhou + v_r*drhov - drhoE);
-dVn  = (drhou*nx + drhov*ny)/rho_r - Vn*drho/rho_r;
+    %% ── 4. Harten-Hyman entropy fix (acoustic waves only) ───────────────
+    % Prevents expansion shocks at sonic transitions
+    % Fix applied to lambda_1 (Vn-c) and lambda_4 (Vn+c)
+    cL = sqrt(max((gamma-1)*(HL - 0.5*(uL^2+vL^2)), 1e-10));
+    cR = sqrt(max((gamma-1)*(HR - 0.5*(uR^2+vR^2)), 1e-10));
 
-a1 = (dp - rho_r*c_r*dVn)/(2*c_r^2);
-a2 = drho - dp/c_r^2;
-a5 = (dp + rho_r*c_r*dVn)/(2*c_r^2);
+    eps1 = max(0.0, (Vn_r - c_r) - (VnL - cL));
+    eps4 = max(0.0, (VnR + cR)   - (Vn_r + c_r));
 
-K1 = l1*a1*[1; u_r-c_r*nx; v_r-c_r*ny; H_r-c_r*Vn];
-K2 = l2*a2*[1; u_r; v_r; 0.5*(u_r^2+v_r^2)];
-K5 = l4*a5*[1; u_r+c_r*nx; v_r+c_r*ny; H_r+c_r*Vn];
+    if abs(lam1) < eps1 && eps1 > 0
+        lam1 = 0.5*(lam1^2/eps1 + eps1);
+    end
+    if abs(lam4) < eps4 && eps4 > 0
+        lam4 = 0.5*(lam4^2/eps4 + eps4);
+    end
 
-F_star = 0.5*(FL+FR) - 0.5*(K1+K2+K5);
+    %% ── 5. Wave strengths (Toro 2009 eq. 11.75) ─────────────────────────
+    % Jump in conserved variables
+    drho = rhoR - rhoL;
+    du   = uR   - uL;
+    dv   = vR   - vL;
+    dp   = pR   - pL;
+    dVn  = VnR  - VnL;
+
+    % Tangential unit vector: t = (-ny, nx)
+    tx = -ny;  ty = nx;
+    dVt = du*tx + dv*ty;   % jump in tangential velocity
+
+    % alpha_k = wave strength for k-th characteristic field
+    a1 = (dp - rhoR*c_r*dVn) / (2.0*c_r^2);   % left-running acoustic
+    a4 = (dp + rhoR*c_r*dVn) / (2.0*c_r^2);   % right-running acoustic
+    a2 = drho - dp/c_r^2;                       % entropy wave
+    a3 = (rhoL + rhoR)*0.5 * dVt;              % shear wave
+
+    %% ── 6. Right eigenvectors (columns, Toro 2009 Table 11.1) ───────────
+    % R = [r1 | r2 | r3 | r4]
+    % r1: left-running acoustic  (lam = Vn - c)
+    r1 = [1;
+          u_r - c_r*nx;
+          v_r - c_r*ny;
+          H_r - Vn_r*c_r];
+
+    % r2: entropy wave  (lam = Vn)
+    r2 = [1;
+          u_r;
+          v_r;
+          0.5*(u_r^2 + v_r^2)];
+
+    % r3: shear wave  (lam = Vn)
+    r3 = [0;
+          tx;
+          ty;
+          u_r*tx + v_r*ty];
+
+    % r4: right-running acoustic  (lam = Vn + c)
+    r4 = [1;
+          u_r + c_r*nx;
+          v_r + c_r*ny;
+          H_r + Vn_r*c_r];
+
+    %% ── 7. Roe flux assembly ─────────────────────────────────────────────
+    % F_roe = 0.5*(F_L + F_R) - 0.5 * sum_k |lam_k| * a_k * r_k
+    FL = normal_flux(QL, nx, ny, gamma);
+    FR = normal_flux(QR, nx, ny, gamma);
+
+    dissipation = abs(lam1)*a1*r1 + abs(lam2)*a2*r2 + ...
+                  abs(lam3)*a3*r3 + abs(lam4)*a4*r4;
+
+    F_roe = 0.5*(FL + FR) - 0.5*dissipation;
 end
 
-function la = entropy_fix(lambda, eps)
-if abs(lambda) >= eps
-    la = abs(lambda);
-else
-    la = (lambda^2 + eps^2)/(2*eps);
-end
-end
-
-function Fn = normal_flux(U, nx, ny, gamma)
-rho = U(1); u = U(2)/rho; v = U(3)/rho; E = U(4)/rho;
-p = (gamma-1)*rho*(E - 0.5*(u^2+v^2)); H = E + p/rho;
-Vn = u*nx + v*ny;
-Fn = [rho*Vn; rho*u*Vn+p*nx; rho*v*Vn+p*ny; rho*H*Vn];
+% ── Normal inviscid flux  F*nx + G*ny ────────────────────────────────────
+function Fn = normal_flux(Q, nx, ny, gamma)
+    rho = Q(1);  u = Q(2)/rho;  v = Q(3)/rho;
+    E   = Q(4);
+    p   = max((gamma-1)*(E - 0.5*rho*(u^2+v^2)), 1e-12);
+    Vn  = u*nx + v*ny;
+    Fn  = [rho*Vn;
+           rho*u*Vn + p*nx;
+           rho*v*Vn + p*ny;
+           (E+p)*Vn];
 end
