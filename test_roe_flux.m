@@ -7,7 +7,7 @@ clear; clc;
 fprintf('=== FIX #6 ROE FLUX TESTS ===\n\n');
 gamma = 1.4;
 
-%% ── Helper ───────────────────────────────────────────────────────────────
+%% ── Helper ───────────────────────────────────
 function Fn = exact_flux(Q, nx, ny, gamma)
     rho=Q(1); u=Q(2)/rho; v=Q(3)/rho; E=Q(4);
     p=max((gamma-1)*(E-0.5*rho*(u^2+v^2)),1e-12);
@@ -15,7 +15,7 @@ function Fn = exact_flux(Q, nx, ny, gamma)
     Fn=[rho*Vn; rho*u*Vn+p*nx; rho*v*Vn+p*ny; (E+p)*Vn];
 end
 
-%% TEST 1 — Consistency: QL=QR => F_roe = exact flux ─────────────────────
+%% TEST 1 — Consistency: QL=QR => F_roe = exact flux ────────────
 rho=1.0; u=0.3; v=0.1; p=1/gamma;
 E=p/(gamma-1)+0.5*rho*(u^2+v^2);
 Q=[rho;rho*u;rho*v;E];
@@ -26,7 +26,7 @@ err = max(abs(F_r - F_e));
 assert(err < 1e-12, 'FAIL T1: consistency error = %e', err);
 fprintf('TEST 1 (consistency QL=QR):          err = %.2e  PASS\n', err);
 
-%% TEST 2 — Conservation: F(QL,QR,n) = -F(QR,QL,-n) ─────────────────────
+%% TEST 2 — Conservation: F(QL,QR,n) = -F(QR,QL,-n) ────────────
 rhoL=1.0; uL=0.4; vL=0.1; pL=1/gamma;
 EL=pL/(gamma-1)+0.5*rhoL*(uL^2+vL^2);
 QL=[rhoL;rhoL*uL;rhoL*vL;EL];
@@ -40,7 +40,7 @@ err2 = max(abs(F_lr + F_rl));
 assert(err2 < 1e-12, 'FAIL T2: conservation error = %e', err2);
 fprintf('TEST 2 (conservation F+F_flip=0):    err = %.2e  PASS\n', err2);
 
-%% TEST 3 — Positivity: density and pressure in dissipation term ──────────
+%% TEST 3 — Positivity: density and pressure in dissipation term ─────
 % Mild shear case — should not produce negative density flux
 Q_left  = [1.2; 1.2*0.5; 1.2*0.1; 2.5];
 Q_right = [0.9; 0.9*0.3; 0.9*0.05; 2.0];
