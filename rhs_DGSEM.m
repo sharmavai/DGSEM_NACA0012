@@ -1,165 +1,232 @@
-function dUdt = rhs_DGSEM(U, mesh, N, D, w, gamma, mu, Pr, R, U_inf, alpha, p_inf, T_inf)
-% Non-dimensional: rho_inf=1, U_inf=1, chord=1, p_inf=1/gamma
+% =========================================================================
+%  rhs_DGSEM.m
+%  Spatial residual for 2D compressible Euler equations via DGSEM
+%  (strong-form SBP-SAT on curvilinear C-grid)
+%
+%  FIX Applied:
+%    - Used mesh.nelem — corrected to mesh.n_elem.
+%    - Used mesh.airfoil_ids / mesh.farfield_ids — corrected to
+%      mesh.airfoil_ei / mesh.ff_elems.
+%    - mesh.x was treated as (n_radial, n_circ, 4_corners).  mesh.x is
+%      (Np1, Np1, n_elem).  Neighbor map rewritten using nxi_c/neta.
+%    - xi-direction = circumferential, eta-direction = radial (matching
+%      generate_mesh_NACA0012.m).  Wall BC is on eta=-1 (ej=1), farfield
+%      is on eta=+1 (ej=neta).  Previous code had these on xi faces.
+%    - Volume integral now uses curvilinear metric terms (J, xi_x, xi_y,
+%      eta_x, eta_y) for contravariant fluxes — fixes GCL / free-stream
+%      preservation on non-Cartesian meshes.
+%    - Face fluxes use Lax-Friedrichs with proper face-normal computation
+%      from element geometry.
+%    - Calls wall_bc.m and farfield_bc.m for boundary ghost states.
+%
+%  Q layout: (n_elem, Np1, Np1, 4)
+%    Q(e,i,j,1:4) = [rho, rho*u, rho*v, E]
+%    i = xi-node (circumferential), j = eta-node (radial)
+%
+%  References:
+%    [1] Kopriva (2009) Ch. 8 — DGSEM with metric terms
+%    [2] Hesthaven & Warburton (2008) — SBP-SAT framework
+% =========================================================================
 
-nelem = mesh.nelem;
-dUdt  = zeros(size(U));
-[n_radial, n_circ, ~] = size(mesh.x);
+function dUdt = rhs_DGSEM(U, mesh, gamma, mu, k_cond)
 
-alpha_rad = alpha * pi / 180;
-u_inf  = U_inf * cos(alpha_rad);
-v_inf  = U_inf * sin(alpha_rad);
-rho_ff = 1.0;
-p_ff   = p_inf;
-E_ff   = p_ff/((gamma-1)*rho_ff) + 0.5*(u_inf^2+v_inf^2);
-Uff    = [rho_ff; rho_ff*u_inf; rho_ff*v_inf; rho_ff*E_ff];
+n_elem = mesh.n_elem;
+nxi_c  = mesh.nxi_c;
+neta   = mesh.neta;
+N      = mesh.N;
+Np1    = N + 1;
+D      = mesh.D;
+w      = mesh.w_lgl;
 
-is_wall = false(nelem,1);  is_wall(mesh.airfoil_ids)  = true;
-is_far  = false(nelem,1);  is_far(mesh.farfield_ids)   = true;
+Mach      = mesh.Mach;
+alpha_deg = mesh.alpha_deg;
 
-% neighbour index map
-nbr = zeros(nelem,4);  % 1=i+, 2=i-, 3=j+, 4=j-
-for j = 1:n_circ
-    for i = 1:n_radial
-        e = i + (j-1)*n_radial;
-        if i < n_radial, nbr(e,1) = (i+1)+(j-1)*n_radial; end
-        if i > 1,        nbr(e,2) = (i-1)+(j-1)*n_radial; end
-        jp = mod(j, n_circ)+1;  jm = mod(j-2,n_circ)+1;
-        nbr(e,3) = i+(jp-1)*n_radial;
-        nbr(e,4) = i+(jm-1)*n_radial;
+dUdt = zeros(size(U));
+
+for e = 1:n_elem
+    ei = mod(e-1, nxi_c) + 1;
+    ej = floor((e-1) / nxi_c) + 1;
+
+    Qe = squeeze(U(e,:,:,:));   % (Np1, Np1, 4)
+    xe = mesh.x(:,:,e);
+    ye = mesh.y(:,:,e);
+    Je = mesh.J(:,:,e);
+
+    % ── Primitive variables ──────────────────────────────────────────
+    rho = max(Qe(:,:,1), 1e-12);
+    uu  = Qe(:,:,2) ./ rho;
+    vv  = Qe(:,:,3) ./ rho;
+    EE  = Qe(:,:,4) ./ rho;
+    pp  = max((gamma-1)*rho.*(EE - 0.5*(uu.^2 + vv.^2)), 1e-12);
+    HH  = EE + pp./rho;
+
+    % ── Physical fluxes ──────────────────────────────────────────────
+    F = zeros(Np1, Np1, 4);  G = zeros(Np1, Np1, 4);
+    F(:,:,1) = rho.*uu;            G(:,:,1) = rho.*vv;
+    F(:,:,2) = rho.*uu.*uu + pp;   G(:,:,2) = rho.*uu.*vv;
+    F(:,:,3) = rho.*uu.*vv;        G(:,:,3) = rho.*vv.*vv + pp;
+    F(:,:,4) = rho.*uu.*HH;        G(:,:,4) = rho.*vv.*HH;
+
+    % ── Contravariant fluxes (metric terms) ──────────────────────────
+    xi_xe  = mesh.xi_x(:,:,e);    xi_ye  = mesh.xi_y(:,:,e);
+    eta_xe = mesh.eta_x(:,:,e);   eta_ye = mesh.eta_y(:,:,e);
+
+    Fh = zeros(Np1, Np1, 4);
+    Gh = zeros(Np1, Np1, 4);
+    for k = 1:4
+        Fh(:,:,k) = Je .* (xi_xe.*F(:,:,k)  + xi_ye.*G(:,:,k));
+        Gh(:,:,k) = Je .* (eta_xe.*F(:,:,k) + eta_ye.*G(:,:,k));
     end
-end
 
-for e = 1:nelem
-    Ue = squeeze(U(e,:,:,:));
-    [rho,u,v,p,H,ok] = get_prim(Ue, gamma);
-    if ~ok, dUdt(e,:,:,:) = 0; continue; end
-
-    F = Fx(rho,u,v,p,H);
-    G = Gy(rho,u,v,p,H);
-    dFdx = zeros(N+1,N+1,4);
-    dGdy = zeros(N+1,N+1,4);
-    for k=1:4
-        dFdx(:,:,k) = D*F(:,:,k);
-        dGdy(:,:,k) = (D*G(:,:,k)')';
+    % ── Volume integral: D_xi(Fh) + D_eta(Gh) ───────────────────────
+    Res = zeros(Np1, Np1, 4);
+    for k = 1:4
+        Res(:,:,k) = D * Fh(:,:,k) + (D * Gh(:,:,k)')';
     end
-    Res = dFdx + dGdy;
 
-    c_el  = sqrt(gamma*p./rho);
-    lam_e = max(max(sqrt(u.^2+v.^2) + c_el));
+    % Max wave speed in element
+    cc    = sqrt(gamma * pp ./ rho);
+    lam_e = max(sqrt(uu(:).^2 + vv(:).^2) + cc(:));
 
-    % --- face 1: xi=+1 (radial outward, i=N+1 row) ---
-    nb = nbr(e,1);
-    if nb > 0 && ~is_far(e)
-        Une = squeeze(U(nb,:,:,:));
-        [rn,un,vn,pn,Hn,okn] = get_prim(Une,gamma);
-        if okn
-            lf = max(lam_e, max(max(sqrt(un.^2+vn.^2)+sqrt(gamma*pn./rn))));
-            Fn = Fx(rn,un,vn,pn,Hn);
+    % ── FACE 1: xi = +1 (i=Np1), circumferential +1 ─────────────────
+    ei_p = mod(ei, nxi_c) + 1;
+    nb   = ei_p + (ej-1)*nxi_c;
+    Qnb  = squeeze(U(nb,:,:,:));
+    y_eta_f = (ye(Np1,:) * D')';   x_eta_f = (xe(Np1,:) * D')';
+    for j = 1:Np1
+        sJ = sqrt(y_eta_f(j)^2 + x_eta_f(j)^2);
+        if sJ < 1e-30, continue; end
+        nx =  y_eta_f(j)/sJ;   ny = -x_eta_f(j)/sJ;
+        QL4 = squeeze(Qe(Np1,j,:));
+        QR4 = squeeze(Qnb(1,j,:));
+        lam = max(lam_e, ws(QR4,gamma));
+        Fn_L = nflux(QL4,nx,ny,gamma);
+        Fn_R = nflux(QR4,nx,ny,gamma);
+        Fn_num = 0.5*(Fn_L+Fn_R) - 0.5*lam*(QR4(:)-QL4(:));
+        for k=1:4
+            Res(Np1,j,k) = Res(Np1,j,k) + sJ*(Fn_num(k)-Fn_L(k))/w(Np1);
+        end
+    end
+
+    % ── FACE 2: xi = -1 (i=1), circumferential -1 ───────────────────
+    ei_m = mod(ei-2, nxi_c) + 1;
+    nb   = ei_m + (ej-1)*nxi_c;
+    Qnb  = squeeze(U(nb,:,:,:));
+    y_eta_f = (ye(1,:) * D')';   x_eta_f = (xe(1,:) * D')';
+    for j = 1:Np1
+        sJ = sqrt(y_eta_f(j)^2 + x_eta_f(j)^2);
+        if sJ < 1e-30, continue; end
+        nx = y_eta_f(j)/sJ;  ny = -x_eta_f(j)/sJ;
+        Q_left  = squeeze(Qnb(Np1,j,:));
+        Q_right = squeeze(Qe(1,j,:));
+        lam = max(lam_e, ws(Q_left,gamma));
+        Fn_L = nflux(Q_left,nx,ny,gamma);
+        Fn_R = nflux(Q_right,nx,ny,gamma);
+        Fn_num = 0.5*(Fn_L+Fn_R) - 0.5*lam*(Q_right(:)-Q_left(:));
+        for k=1:4
+            Res(1,j,k) = Res(1,j,k) - sJ*(Fn_num(k)-Fn_R(k))/w(1);
+        end
+    end
+
+    % ── FACE 3: eta = +1 (j=Np1), radial outward ────────────────────
+    y_xi_f = D * ye(:,Np1);   x_xi_f = D * xe(:,Np1);
+    if ej < neta
+        nb  = ei + ej*nxi_c;
+        Qnb = squeeze(U(nb,:,:,:));
+        for i = 1:Np1
+            sJ = sqrt(y_xi_f(i)^2 + x_xi_f(i)^2);
+            if sJ < 1e-30, continue; end
+            nx = -y_xi_f(i)/sJ;  ny = x_xi_f(i)/sJ;
+            QL4 = squeeze(Qe(i,Np1,:));
+            QR4 = squeeze(Qnb(i,1,:));
+            lam = max(lam_e, ws(QR4,gamma));
+            Fn_L = nflux(QL4,nx,ny,gamma);
+            Fn_R = nflux(QR4,nx,ny,gamma);
+            Fn_num = 0.5*(Fn_L+Fn_R) - 0.5*lam*(QR4(:)-QL4(:));
             for k=1:4
-                num = 0.5*(F(N+1,:,k)+Fn(1,:,k)) - 0.5*lf*(Une(1,:,k)-Ue(N+1,:,k));
-                Res(N+1,:,k) = Res(N+1,:,k) + (num-F(N+1,:,k))/w(N+1);
+                Res(i,Np1,k) = Res(i,Np1,k) + sJ*(Fn_num(k)-Fn_L(k))/w(Np1);
             end
         end
-    elseif is_far(e)
-        lf = abs(u_inf)+sqrt(gamma*p_ff/rho_ff);
-        for j=1:N+1
-            fin = Fxv(squeeze(Ue(N+1,j,:)), gamma);
-            ff  = Fxv(Uff, gamma);
-            num = 0.5*(fin+ff) - 0.5*lf*(Uff - squeeze(Ue(N+1,j,:)));
-            for k=1:4, Res(N+1,j,k) = Res(N+1,j,k)+(num(k)-fin(k))/w(N+1); end
-        end
-    end
-
-    % --- face 2: xi=-1 (radial inward, i=1 row) ---
-    nb = nbr(e,2);
-    if nb > 0
-        Une = squeeze(U(nb,:,:,:));
-        [rn,un,vn,pn,Hn,okn] = get_prim(Une,gamma);
-        if okn
-            lf = max(lam_e, max(max(sqrt(un.^2+vn.^2)+sqrt(gamma*pn./rn))));
-            Fn = Fx(rn,un,vn,pn,Hn);
+    else
+        % Farfield boundary
+        for i = 1:Np1
+            sJ = sqrt(y_xi_f(i)^2 + x_xi_f(i)^2);
+            if sJ < 1e-30, continue; end
+            nx = -y_xi_f(i)/sJ;  ny = x_xi_f(i)/sJ;
+            QL4 = squeeze(Qe(i,Np1,:));
+            QR4 = farfield_bc(QL4, nx, ny, Mach, alpha_deg, gamma);
+            lam = max(lam_e, ws(QR4,gamma));
+            Fn_L = nflux(QL4,nx,ny,gamma);
+            Fn_R = nflux(QR4,nx,ny,gamma);
+            Fn_num = 0.5*(Fn_L+Fn_R) - 0.5*lam*(QR4(:)-QL4(:));
             for k=1:4
-                num = 0.5*(Fn(N+1,:,k)+F(1,:,k)) - 0.5*lf*(Ue(1,:,k)-Une(N+1,:,k));
-                Res(1,:,k) = Res(1,:,k) - (num-F(1,:,k))/w(1);
-            end
-        end
-    elseif is_wall(e)
-        for j=1:N+1
-            Ui = squeeze(Ue(1,j,:));
-            ri = max(Ui(1),1e-12);
-            Ug = [ri; -Ui(2); -Ui(3); Ui(4)];  % mirror velocity → no-slip
-            fin = Fxv(Ui, gamma);
-            num = LF(Ui, Ug, gamma, lam_e);
-            for k=1:4, Res(1,j,k) = Res(1,j,k)-(num(k)-fin(k))/w(1); end
-        end
-    end
-
-    % --- face 3: eta=+1 (j=N+1 col) ---
-    nb = nbr(e,3);
-    if nb > 0
-        Une = squeeze(U(nb,:,:,:));
-        [rn,un,vn,pn,Hn,okn] = get_prim(Une,gamma);
-        if okn
-            lf = max(lam_e, max(max(sqrt(un.^2+vn.^2)+sqrt(gamma*pn./rn))));
-            Gn = Gy(rn,un,vn,pn,Hn);
-            for k=1:4
-                num = 0.5*(G(:,N+1,k)+Gn(:,1,k)) - 0.5*lf*(Une(:,1,k)-Ue(:,N+1,k));
-                Res(:,N+1,k) = Res(:,N+1,k) + (num-G(:,N+1,k))/w(N+1);
+                Res(i,Np1,k) = Res(i,Np1,k) + sJ*(Fn_num(k)-Fn_L(k))/w(Np1);
             end
         end
     end
 
-    % --- face 4: eta=-1 (j=1 col) ---
-    nb = nbr(e,4);
-    if nb > 0
-        Une = squeeze(U(nb,:,:,:));
-        [rn,un,vn,pn,Hn,okn] = get_prim(Une,gamma);
-        if okn
-            lf = max(lam_e, max(max(sqrt(un.^2+vn.^2)+sqrt(gamma*pn./rn))));
-            Gn = Gy(rn,un,vn,pn,Hn);
+    % ── FACE 4: eta = -1 (j=1), radial inward ───────────────────────
+    y_xi_f = D * ye(:,1);   x_xi_f = D * xe(:,1);
+    if ej > 1
+        nb  = ei + (ej-2)*nxi_c;
+        Qnb = squeeze(U(nb,:,:,:));
+        for i = 1:Np1
+            sJ = sqrt(y_xi_f(i)^2 + x_xi_f(i)^2);
+            if sJ < 1e-30, continue; end
+            nx = -y_xi_f(i)/sJ;  ny = x_xi_f(i)/sJ;
+            Q_left  = squeeze(Qnb(i,Np1,:));
+            Q_right = squeeze(Qe(i,1,:));
+            lam = max(lam_e, ws(Q_left,gamma));
+            Fn_L = nflux(Q_left,nx,ny,gamma);
+            Fn_R = nflux(Q_right,nx,ny,gamma);
+            Fn_num = 0.5*(Fn_L+Fn_R) - 0.5*lam*(Q_right(:)-Q_left(:));
             for k=1:4
-                num = 0.5*(Gn(:,N+1,k)+G(:,1,k)) - 0.5*lf*(Ue(:,1,k)-Une(:,N+1,k));
-                Res(:,1,k) = Res(:,1,k) - (num-G(:,1,k))/w(1);
+                Res(i,1,k) = Res(i,1,k) - sJ*(Fn_num(k)-Fn_R(k))/w(1);
+            end
+        end
+    else
+        % Wall boundary (ej=1): no-slip via ghost cell
+        for i = 1:Np1
+            sJ = sqrt(y_xi_f(i)^2 + x_xi_f(i)^2);
+            if sJ < 1e-30, continue; end
+            nx = -y_xi_f(i)/sJ;  ny = x_xi_f(i)/sJ;
+            Q_int4   = squeeze(Qe(i,1,:));
+            Q_ghost4 = wall_bc(Q_int4, gamma);
+            lam = max(lam_e, ws(Q_ghost4,gamma));
+            Fn_ghost = nflux(Q_ghost4,nx,ny,gamma);
+            Fn_int   = nflux(Q_int4,nx,ny,gamma);
+            Fn_num   = 0.5*(Fn_ghost+Fn_int) - 0.5*lam*(Q_int4(:)-Q_ghost4(:));
+            for k=1:4
+                Res(i,1,k) = Res(i,1,k) - sJ*(Fn_num(k)-Fn_int(k))/w(1);
             end
         end
     end
 
-    for jj=1:N+1
-        for ii=1:N+1
-            dUdt(e,ii,jj,:) = -squeeze(Res(ii,jj,:)) / (w(ii)*w(jj));
+    % ── dQ/dt = -Res / J ─────────────────────────────────────────────
+    for jj = 1:Np1
+        for ii = 1:Np1
+            dUdt(e,ii,jj,:) = -squeeze(Res(ii,jj,:)) / Je(ii,jj);
         end
     end
 end
 end
 
-function [rho,u,v,p,H,ok] = get_prim(Ue, gamma)
-    rho = max(Ue(:,:,1), 1e-12);
-    u   = Ue(:,:,2)./rho;
-    v   = Ue(:,:,3)./rho;
-    E   = Ue(:,:,4)./rho;
-    p   = (gamma-1)*rho.*(E - 0.5*(u.^2+v.^2));
-    p   = max(p, 1e-12);
-    H   = E + p./rho;
-    ok  = all(isfinite(rho(:))) && all(isfinite(p(:)));
+% ── Helpers ──────────────────────────────────────────────────────────────
+
+function lam = ws(Q4, gamma)
+    Q4  = Q4(:);
+    rho = max(Q4(1), 1e-12);
+    u   = Q4(2)/rho;  v = Q4(3)/rho;  E = Q4(4)/rho;
+    p   = max((gamma-1)*rho*(E - 0.5*(u^2+v^2)), 1e-12);
+    lam = sqrt(u^2+v^2) + sqrt(gamma*p/rho);
 end
 
-function F = Fx(rho,u,v,p,H)
-    F = cat(3, rho.*u, rho.*u.*u+p, rho.*u.*v, rho.*u.*H);
-end
-
-function G = Gy(rho,u,v,p,H)
-    G = cat(3, rho.*v, rho.*u.*v, rho.*v.*v+p, rho.*v.*H);
-end
-
-function f = Fxv(U4, gamma)
-    U4 = U4(:);
-    r = max(U4(1),1e-12); u=U4(2)/r; v=U4(3)/r; E=U4(4)/r;
-    p = max((gamma-1)*r*(E-0.5*(u^2+v^2)), 1e-12);
-    H = E+p/r;
-    f = [r*u; r*u*u+p; r*u*v; r*u*H];
-end
-
-function fn = LF(UL, UR, gamma, lam)
-    fL = Fxv(UL,gamma); fR = Fxv(UR,gamma);
-    fn = 0.5*(fL+fR) - 0.5*lam*(UR(:)-UL(:));
+function Fn = nflux(Q4, nx, ny, gamma)
+    Q4  = Q4(:);
+    rho = max(Q4(1), 1e-12);
+    u = Q4(2)/rho;  v = Q4(3)/rho;
+    E = Q4(4);
+    p = max((gamma-1)*(E - 0.5*rho*(u^2+v^2)), 1e-12);
+    Vn = u*nx + v*ny;
+    Fn = [rho*Vn; rho*u*Vn + p*nx; rho*v*Vn + p*ny; (E+p)*Vn];
 end

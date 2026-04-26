@@ -24,12 +24,13 @@ fprintf('TEST 2 — Free-stream preservation (GCL)\n');
 gamma = 1.4;  Mach = 0.3;
 rho0 = 1.0;  u0 = Mach;  v0 = 0.0;
 p0   = 1/(gamma);  E0 = p0/(gamma-1) + 0.5*rho0*(u0^2+v0^2);
+mesh.Mach = Mach;  mesh.alpha_deg = 0.0;
 Q0   = initialize_solution(mesh, Mach, 0.0, gamma, N);
 Q_test = Q0;
 dt = compute_timestep(Q_test, mesh, 0.1, 0.1, gamma, 1/Re, N);
 for k = 1:5
     Q_test = rk4_step(Q_test, dt, mesh, gamma, 1/Re, ...
-                      gamma/(0.72*(gamma-1)*Re), N);
+                      gamma/(0.72*(gamma-1)*Re));
 end
 gcl_err = max(abs(Q_test(:) - Q0(:)));
 fprintf('  GCL residual = %.4e  (must be < 1e-10)\n', gcl_err);

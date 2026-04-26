@@ -93,10 +93,14 @@ function F_roe = roe_flux(QL, QR, nx, ny, gamma)
     dVt = du*tx + dv*ty;   % jump in tangential velocity
 
     % alpha_k = wave strength for k-th characteristic field
-    a1 = (dp - rhoR*c_r*dVn) / (2.0*c_r^2);   % left-running acoustic
-    a4 = (dp + rhoR*c_r*dVn) / (2.0*c_r^2);   % right-running acoustic
+    % FIX: wave strengths must use Roe-averaged density (sqL*sqR),
+    %       not rhoR.  Previous code had rhoR in a1/a4 — violates Roe
+    %       property P (exact resolution of isolated discontinuities).
+    rho_r = sqL * sqR;                          % Roe-averaged density
+    a1 = (dp - rho_r*c_r*dVn) / (2.0*c_r^2);   % left-running acoustic
+    a4 = (dp + rho_r*c_r*dVn) / (2.0*c_r^2);   % right-running acoustic
     a2 = drho - dp/c_r^2;                       % entropy wave
-    a3 = (rhoL + rhoR)*0.5 * dVt;              % shear wave
+    a3 = rho_r * dVt;                           % shear wave
 
     %% ── 6. Right eigenvectors (columns, Toro 2009 Table 11.1) ───────────
     % R = [r1 | r2 | r3 | r4]

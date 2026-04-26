@@ -88,13 +88,17 @@ fprintf('  Far-field radius : %.1f c\n', R_farfield);
 mesh = generate_mesh_NACA0012(nelem_airfoil, nelem_wake, nelem_radial, ...
                                R_farfield, y1_wall, N);
 
+% Store freestream parameters in mesh (needed by rhs_DGSEM for BCs)
+mesh.Mach      = Mach;
+mesh.alpha_deg = alpha;
+
 % ── Mandatory free-stream preservation (GCL) check ──────────────────────
 fprintf('Running GCL / free-stream preservation test...\n');
 Q_fs  = initialize_solution(mesh, Mach, 0.0, gamma, N);  % alpha=0 for GCL test
 Q_gcltest = Q_fs;
 dt_gcltest = compute_timestep(Q_gcltest, mesh, CFL, CFL_v, gamma, mu, N);
 for gclstep = 1:5
-    Q_gcltest = rk4_step(Q_gcltest, dt_gcltest, mesh, gamma, mu, k_cond, N);
+    Q_gcltest = rk4_step(Q_gcltest, dt_gcltest, mesh, gamma, mu, k_cond);
 end
 gcl_residual = max(abs(Q_gcltest(:) - Q_fs(:)));
 fprintf('  GCL residual (should be < 1e-10): %e\n', gcl_residual);
@@ -138,13 +142,14 @@ while time < t_end
 
     % ── RK4 update ────────────────────────────────────────────────────
     Q_prev = Q;
-    Q = rk4_step(Q, dt, mesh, gamma, mu, k_cond, N);
+    Q = rk4_step(Q, dt, mesh, gamma, mu, k_cond);
 
     time = time + dt;
 
     % ── Residual (L-inf norm of dQ/dt) ────────────────────────────────
-    res_rho  = max(abs(Q(1,:) - Q_prev(1,:))) / dt;
-    res_rhoE = max(abs(Q(4,:) - Q_prev(4,:))) / dt;
+    % Q is (n_elem, Np1, Np1, 4) — use (:) to get scalar residual
+    res_rho  = max(abs(Q(:,:,:,1) - Q_prev(:,:,:,1)), [], 'all') / dt;
+    res_rhoE = max(abs(Q(:,:,:,4) - Q_prev(:,:,:,4)), [], 'all') / dt;
     residual = max(res_rho, res_rhoE);
 
     % ── Check for NaN / blow-up ────────────────────────────────────────
@@ -213,9 +218,14 @@ end
 %% ── 11. SAVE RESULTS & CONVERGENCE HISTORY ───────────────────────────────
 conv_hist = conv_hist(1:step, :);  % trim unused rows
 result_file = sprintf('result_Re%.0e_M%.2f_a%.1f.mat', Re, Mach, alpha);
-save(result_file, 'Q', 'mesh', 'conv_hist', ...
-     'CL_mean', 'CD_mean', 'CM_mean', ...
-     'Re', 'Mach', 'alpha', 'N', 'CFL', 'time');
+if n_avg > 0
+    save(result_file, 'Q', 'mesh', 'conv_hist', ...
+         'CL_mean', 'CD_mean', 'CM_mean', ...
+         'Re', 'Mach', 'alpha', 'N', 'CFL', 'time');
+else
+    save(result_file, 'Q', 'mesh', 'conv_hist', ...
+         'Re', 'Mach', 'alpha', 'N', 'CFL', 'time');
+end
 fprintf('\nResults saved to: %s\n', result_file);
 
 %% ── 12. CONVERGENCE PLOT ─────────────────────────────────────────────────
