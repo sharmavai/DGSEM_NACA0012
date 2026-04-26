@@ -34,27 +34,37 @@ function mesh = generate_mesh_NACA0012(nxi, nwake, neta, R_far, y1, N)
     [D, ~, ~]       = derivative_matrix(N);
 
     %% ── 2. NACA 0012 surface points (airfoil section only) ──────────────
-    % Airfoil parametrized with nxi*Np1+1 points using cosine clustering
-    % s=0: lower TE (x=1,y<0)  s=0.5: LE (x=0,y=0)  s=1: upper TE (x=1,y>0)
+    % Airfoil parametrized with nxi*Np1+1 points using COSINE CLUSTERING.
+    % FIX: Previous code used uniform linspace for s_foil, producing
+    %      uniform x-spacing — no LE/TE clustering despite the README
+    %      promising cosine clustering.  This caused poor LE resolution
+    %      (the NACA 0012 thickness has infinite slope at x=0).
+    % CORRECTED: Use x = 0.5*(1 ± cos(theta)) for proper cosine
+    %            distribution that clusters points near LE and TE.
     N_foil = nxi * Np1 + 1;
-    s_foil = linspace(0, 1, N_foil)';
     t  = 0.12;
     yt = @(x) (t/0.2)*(0.2969*sqrt(x) - 0.1260*x ...
                        - 0.3516*x.^2   + 0.2843*x.^3 - 0.1036*x.^4);
 
-    x_foil = zeros(N_foil,1);
-    y_foil = zeros(N_foil,1);
-    for i = 1:N_foil
-        if s_foil(i) <= 0.5
-            xc = 1 - 2*s_foil(i);          % lower surface: TE -> LE
-            x_foil(i) =  xc;
-            y_foil(i) = -yt(xc);
-        else
-            xc = 2*(s_foil(i) - 0.5);      % upper surface: LE -> TE
-            x_foil(i) =  xc;
-            y_foil(i) =  yt(xc);
-        end
-    end
+    N_half = ceil(N_foil / 2);          % points on lower surface (incl. LE)
+    N_up   = N_foil - N_half + 1;       % points on upper surface (incl. shared LE)
+
+    % Lower surface: TE (x=1) -> LE (x=0) with cosine clustering
+    theta_lo = linspace(0, pi, N_half)';
+    x_lo = 0.5*(1 + cos(theta_lo));     % x: 1 -> 0, clustered at both ends
+
+    % Upper surface: LE (x=0) -> TE (x=1) with cosine clustering
+    theta_up = linspace(0, pi, N_up)';
+    x_up = 0.5*(1 - cos(theta_up));     % x: 0 -> 1, clustered at both ends
+
+    x_foil = zeros(N_foil, 1);
+    y_foil = zeros(N_foil, 1);
+
+    x_foil(1:N_half)     = x_lo;
+    y_foil(1:N_half)     = -yt(x_lo);   % lower surface (y < 0)
+
+    x_foil(N_half:N_foil) = x_up;       % LE shared at index N_half
+    y_foil(N_half:N_foil) =  yt(x_up);  % upper surface (y > 0)
 
     %% ── 3. Full C-grid inner boundary (nxi_c*Np1 + 1 points) ─────────────
     % Layout (going around the C):

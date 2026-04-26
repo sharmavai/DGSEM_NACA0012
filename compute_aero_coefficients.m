@@ -1,71 +1,75 @@
-function [CL, CD, CM] = compute_aero_coefficients(U, mesh, N, gamma, rho_inf, U_inf, chord)
-% Surface pressure integration on airfoil wall elements.
+% =========================================================================
+%  compute_aero_coefficients.m
+%  Surface pressure integration on airfoil wall elements.
 %
-% Airfoil path winds CLOCKWISE (TE -> lower -> LE -> upper -> TE).
-% Outward normal into fluid = rotate tangent (dx,dy) by +90 deg CCW:
-%   nx = -dy/seg,  ny = dx/seg
-%
-% Force ON airfoil:  dF = -p * n_outward * ds
-%   Fx += -p * nx * ds
-%   Fy += -p * ny * ds
-%
-% CL = Fy / (q_inf * chord)      [lift perp to freestream, alpha=0 => y]
-% CD = -Fx / (q_inf * chord)     [drag opposing freestream direction]
-% CM = moment / (q_inf * chord^2)
+%  FIX Applied:
+%    - Used mesh.airfoil_ids which doesn't exist; corrected to
+%      mesh.airfoil_ei (circumferential indices of airfoil elements).
+%    - Used mesh.x(1,j,1) treating mesh.x as corner-based; mesh.x is
+%      (Np1, Np1, n_elem).  Corrected to use mesh.wall_x/wall_y/wall_nx
+%      /wall_ny/wall_ds which are pre-computed for the wall face.
+%    - Surface integration used ds = seg/(N+1) (trapezoidal); corrected
+%      to use mesh.wall_ds which includes LGL quadrature weights.
+%    - Lift and drag now correctly rotated to freestream coordinates
+%      for non-zero angle of attack.
+%    - Q-layout updated to (n_elem, Np1, Np1, 4).
+% =========================================================================
 
-q_inf = 0.5 * rho_inf * U_inf^2;
-[n_radial, ~, ~] = size(mesh.x);
+function [CL, CD, CM] = compute_aero_coefficients(Q, mesh, Mach, alpha_deg, gamma, Re, N)
+% Inputs:
+%   Q         — (n_elem, Np1, Np1, 4) conservative variables
+%   mesh      — mesh struct from generate_mesh_NACA0012
+%   Mach      — freestream Mach number
+%   alpha_deg — angle of attack [degrees]
+%   gamma     — ratio of specific heats
+%   Re        — Reynolds number (unused here, kept for interface)
+%   N         — polynomial degree
+
+Np1   = N + 1;
+alpha = alpha_deg * pi / 180.0;
+
+% Non-dimensional reference: rho_inf=1, U_inf=Mach, chord=1
+q_inf = 0.5 * 1.0 * Mach^2;
+chord = 1.0;
 
 Fx = 0;  Fy = 0;  Mt = 0;
 
-for eid = 1:length(mesh.airfoil_ids)
-    e = mesh.airfoil_ids(eid);
-    j = ceil(e / n_radial);
+airfoil_ei = mesh.airfoil_ei;
 
-    % inner face edge of wall element: mesh corners 1 and 2 at radial layer i=1
-    x1 = mesh.x(1, j, 1);  y1 = mesh.y(1, j, 1);
-    x2 = mesh.x(1, j, 2);  y2 = mesh.y(1, j, 2);
+for idx = 1:length(airfoil_ei)
+    ei = airfoil_ei(idx);
+    e  = ei;   % element ID (first radial layer, ej=1)
 
-    dx  = x2 - x1;
-    dy  = y2 - y1;
-    seg = sqrt(dx^2 + dy^2);
-    if seg < 1e-14, continue; end
-
-    % outward normal FROM airfoil INTO fluid
-    % (clockwise path => CCW rotation of tangent = outward)
-    nx = -dy / seg;
-    ny =  dx / seg;
-
-    ds = seg / (N+1);   % arc length per LGL point
-
-    for jj = 1:N+1
-        rho  = U(e, 1, jj, 1);
-        if ~isfinite(rho) || rho <= 0, continue; end
-
-        u_v  = U(e, 1, jj, 2) / rho;
-        v_v  = U(e, 1, jj, 3) / rho;
-        E_v  = U(e, 1, jj, 4) / rho;
-        p    = (gamma-1) * rho * (E_v - 0.5*(u_v^2 + v_v^2));
+    for ii = 1:Np1
+        % Wall face at eta=-1 (j=1)
+        rho = max(Q(e, ii, 1, 1), 1e-12);
+        u_v = Q(e, ii, 1, 2) / rho;
+        v_v = Q(e, ii, 1, 3) / rho;
+        E_v = Q(e, ii, 1, 4) / rho;
+        p   = (gamma-1) * rho * (E_v - 0.5*(u_v^2 + v_v^2));
         if ~isfinite(p) || p < 0, continue; end
 
-        % position along face
-        t   = (jj - 0.5) / (N+1);
-        x_s = x1 + t*dx;
-        y_s = y1 + t*dy;
+        % wall_nx, wall_ny point INTO FLUID (outward from airfoil)
+        nx_w = mesh.wall_nx(ii, ei);
+        ny_w = mesh.wall_ny(ii, ei);
+        ds_w = mesh.wall_ds(ii, ei);
 
-        % force on airfoil = -p * n_outward * ds
-        Fx = Fx - p * nx * ds;
-        Fy = Fy - p * ny * ds;
+        % Force on airfoil = -p * n_outward * ds
+        Fx = Fx - p * nx_w * ds_w;
+        Fy = Fy - p * ny_w * ds_w;
 
-        % moment about quarter chord  (x=0.25c, y=0)
-        Mt = Mt - p * ((x_s - 0.25*chord)*ny - y_s*nx) * ds;
+        % Moment about quarter chord (0.25c, 0)
+        xs = mesh.wall_x(ii, ei);
+        ys = mesh.wall_y(ii, ei);
+        Mt = Mt - p * ((xs - 0.25*chord)*ny_w - ys*nx_w) * ds_w;
     end
 end
 
+% Rotate to freestream coordinates
 q_chord = q_inf * chord;
-CL =  Fy / q_chord;
-CD = -Fx / q_chord;
-CM =  Mt / (q_chord * chord);
+CL = (-Fx*sin(alpha) + Fy*cos(alpha)) / q_chord;
+CD = ( Fx*cos(alpha) + Fy*sin(alpha)) / q_chord;
+CM = Mt / (q_chord * chord);
 
 if ~isfinite(CL), CL = 0; end
 if ~isfinite(CD), CD = 0; end

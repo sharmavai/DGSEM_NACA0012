@@ -13,7 +13,7 @@ CFL     = 0.1;
 t_final = 2.0;
 
 [xi, w] = LGL_quadrature(N);
-D       = derivative_matrix(xi, N);
+D       = derivative_matrix(N);
 
 dx = (domain(2)-domain(1))/nelem_x;
 dy = (domain(4)-domain(3))/nelem_y;
