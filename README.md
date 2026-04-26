@@ -6,7 +6,7 @@ MATLAB implementation of the Discontinuous Galerkin Spectral Element Method (DGS
 
 - **Equations:** 2-D compressible Navier–Stokes (conservative form)
 - **Spatial discretisation:** DGSEM, polynomial degree N = 3, Legendre–Gauss–Lobatto quadrature
-- **Inviscid flux:** Roe approximate Riemann solver with Harten–Hyman entropy fix
+- **Inviscid flux:** Lax-Friedrichs (Rusanov) numerical flux at element interfaces (Roe solver available in `roe_flux.m`)
 - **Viscous flux:** BR2 scheme
 - **Time integration:** Classical RK4 (explicit)
 - **Mesh:** C-grid with cosine clustering on the airfoil surface and geometric radial stretching to the farfield
