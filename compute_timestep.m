@@ -2,15 +2,12 @@
 %  compute_timestep.m
 %  CFL-based time step for DGSEM (inviscid + viscous limits)
 %
-%  FIX Applied:
-%    - Function signature was (U, mesh, N, CFL, gamma) — 5 args
-%      but all callers passed 7 args (U, mesh, CFL, CFL_v, gamma, mu, N).
-%      Corrected to match caller convention.
-%    - Mesh indexing was mesh.x(i,j,corner) assuming a corner-based layout.
-%      mesh.x is actually (Np1, Np1, n_elem).  Corrected to use
-%      mesh.h_min(e) which is pre-computed per element.
-%    - Added viscous CFL (Fourier) limit:  dt_vis = CFL_v * h^2 / (nu*(2N+1)^2)
-%    - Loops over all elements correctly using mesh.n_elem.
+%  Takes the minimum of:
+%    dt_inv = CFL * h / (lambda_max * (2N+1))         [inviscid]
+%    dt_vis = CFL_v * h^2 / (nu * (2N+1)^2)           [viscous Fourier]
+%
+%  References:
+%    [1] Kopriva (2009) Ch. 8 — CFL limits for DGSEM
 % =========================================================================
 
 function dt = compute_timestep(Q, mesh, CFL, CFL_v, gamma, mu, N)
@@ -22,13 +19,15 @@ function dt = compute_timestep(Q, mesh, CFL, CFL_v, gamma, mu, N)
 %   gamma — ratio of specific heats
 %   mu    — dynamic viscosity (non-dim: 1/Re)
 %   N     — polynomial degree
+%
+% Output:
+%   dt    — stable time step
 
 Np1    = N + 1;
 n_elem = mesh.n_elem;
 dt     = inf;
 
 for e = 1:n_elem
-    % Max wave speed in element
     lam_max = 0;
     for jj = 1:Np1
         for ii = 1:Np1
@@ -48,7 +47,7 @@ for e = 1:n_elem
     % Inviscid CFL limit
     dt_inv = CFL * h / (lam_max * (2*N+1));
 
-    % Viscous (Fourier) limit: dt <= CFL_v * h^2 / (nu * (2N+1)^2)
+    % Viscous (Fourier) limit
     if mu > 0
         dt_vis = CFL_v * h^2 / (mu * (2*N+1)^2);
     else

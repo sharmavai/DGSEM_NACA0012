@@ -2,20 +2,24 @@
 %  rk4_step.m
 %  Classical four-stage Runge-Kutta time integrator.
 %
-%  FIX: This function was referenced in main_NACA0012.m but did not exist.
+%  Computes the full NS residual including viscous (BR2) terms
+%  by calling rhs_DGSEM with both mu and k_cond.
+%
+%  Stability: CFL_max(RK4, DGSEM, N) = 1/(2N+1)
+%    N=1: 0.333, N=2: 0.200, N=3: 0.143, N=4: 0.111
 % =========================================================================
 
 function Qnew = rk4_step(Q, dt, mesh, gamma, mu, k_cond)
 % Inputs:
 %   Q      — (n_elem, Np1, Np1, 4) conservative variables
 %   dt     — time step
-%   mesh   — mesh struct
-%   gamma  — ratio of specific heats
-%   mu     — dynamic viscosity (1/Re)
+%   mesh   — mesh struct (contains Mach, alpha_deg for BCs)
+%   gamma  — ratio of specific heats (1.4)
+%   mu     — dynamic viscosity (non-dim: 1/Re)
 %   k_cond — thermal conductivity (mu*gamma/(Pr*(gamma-1)))
 %
 % Output:
-%   Qnew   — updated solution
+%   Qnew   — updated solution (same size as Q)
 
 k1 = rhs_DGSEM(Q,              mesh, gamma, mu, k_cond);
 k2 = rhs_DGSEM(Q + 0.5*dt*k1,  mesh, gamma, mu, k_cond);

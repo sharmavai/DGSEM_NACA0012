@@ -2,14 +2,11 @@
 %  compute_pressure_coefficient.m
 %  Surface Cp distribution on the NACA 0012 airfoil.
 %
-%  FIX Applied:
-%    - p_inf formula was wrong: used rho_inf*U_inf^2/(gamma*1.4^2)
-%      which has a hardcoded 1.4^2.  Corrected to 1/gamma (non-dim).
-%    - Surface coordinates were hardcoded to (0.5, 0.0) for ALL nodes,
-%      making any Cp-vs-x plot useless.  Corrected to use actual mesh
-%      wall coordinates from mesh.wall_x, mesh.wall_y.
-%    - Updated to use (n_elem, Np1, Np1, 4) Q-layout and correct
-%      mesh field names (airfoil_ei, wall_x, wall_y).
+%  Uses mesh wall coordinates and LGL quadrature for accurate
+%  surface pressure distribution.
+%
+%  References:
+%    [1] Gregory & O'Reilly (1970) R&M 3726 — NACA 0012 Cp data
 % =========================================================================
 
 function [Cp, x_surf, y_surf] = compute_pressure_coefficient(Q, mesh, gamma, Mach, N)
@@ -29,9 +26,10 @@ Np1 = N + 1;
 
 % Non-dimensional reference state
 q_inf = 0.5 * 1.0 * Mach^2;      % 0.5 * rho_inf * U_inf^2
-p_inf = 1.0 / gamma;              % FIX: was rho_inf*U_inf^2/(gamma*1.4^2)
+p_inf = 1.0 / gamma;              % Non-dimensional freestream pressure
 
 airfoil_ei = mesh.airfoil_ei;
+wall_elems = mesh.wall_elems;
 n_airfoil  = length(airfoil_ei);
 n_surf     = n_airfoil * Np1;
 
@@ -40,9 +38,9 @@ x_surf = zeros(n_surf, 1);
 y_surf = zeros(n_surf, 1);
 
 idx = 0;
-for ii = 1:n_airfoil
-    ei = airfoil_ei(ii);
-    e  = ei;                       % first radial layer (ej=1)
+for ii_idx = 1:n_airfoil
+    ei = airfoil_ei(ii_idx);
+    e  = wall_elems(ei);     % Correct global element ID
 
     for jj = 1:Np1
         idx = idx + 1;
@@ -55,7 +53,6 @@ for ii = 1:n_airfoil
 
         Cp(idx) = (p - p_inf) / q_inf;
 
-        % FIX: use actual mesh surface coordinates (was 0.5, 0.0 for ALL)
         x_surf(idx) = mesh.wall_x(jj, ei);
         y_surf(idx) = mesh.wall_y(jj, ei);
     end
